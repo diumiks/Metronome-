@@ -202,6 +202,12 @@ struct MetronomeView: View {
                     precisionTimer.updateBPM(bpm, timeSignature: timeSignature, soundTheme: newValue.rawValue)
                 }
             }
+            .onReceive(NotificationCenter.default.publisher(for: .stopMetronome)) { _ in
+                if isPlaying {
+                    isPlaying = false
+                    stopMetronome()
+                }
+            }
             .sheet(isPresented: $showSettings) {
                 MetronomeSettingsSheet(
                     timeSignature: $timeSignature,

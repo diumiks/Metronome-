@@ -213,7 +213,7 @@ final class TunerEngine: ObservableObject {
 
         DispatchQueue.main.async { self.data.amplitude = amp }
 
-        let baseThreshold = AudioConstants.rmsThreshold * 0.6
+        let baseThreshold = AudioConstants.rmsThreshold * 0.45
         if amp < max(baseThreshold, noiseFloorRMS * 1.25) {
             noiseFloorRMS = noiseFloorAlpha * noiseFloorRMS + (1.0 - noiseFloorAlpha) * amp
         }
@@ -272,13 +272,13 @@ final class TunerEngine: ObservableObject {
             if c > bestCorr { bestCorr = c; bestLag = lag }
         }
 
-        if bestCorr < 0.18 { return nil }
+        if bestCorr < 0.15 { return nil }
 
         var firstPeak: Int?
         if maxLag - minLag >= 2 {
             for lag in (minLag + 1)..<maxLag {
                 let p = correlations[lag - 1], c = correlations[lag], n = correlations[lag + 1]
-                if c > 0.28 && c > p && c > n { firstPeak = lag; break }
+                if c > 0.24 && c > p && c > n { firstPeak = lag; break }
             }
         }
         if let peak = firstPeak, correlations[peak] >= bestCorr * 0.85 {
@@ -322,7 +322,7 @@ final class TunerEngine: ObservableObject {
                     if delta < 30 { pendingJumpCount += 1 }
                     else { pendingJumpPitch = median; pendingJumpCount = 1 }
 
-                    if pendingJumpCount >= 2 {
+                    if pendingJumpCount >= 1 {
                         smoothedPitch = median
                         recentPitchEstimates = [median]
                         pendingJumpPitch = 0
@@ -337,7 +337,7 @@ final class TunerEngine: ObservableObject {
             }
         }
 
-        let smoothing = amplitude > 0.08 ? 0.75 : 0.55
+        let smoothing = amplitude > 0.08 ? 0.85 : 0.65
         if smoothedPitch == 0 { smoothedPitch = median }
         else { smoothedPitch += (median - smoothedPitch) * smoothing }
 

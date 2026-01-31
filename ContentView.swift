@@ -40,6 +40,9 @@ struct ContentView: View {
             updateScreenAwake()
         }
         .onChange(of: selectedTab) { _, newValue in
+            if newValue == 1 {
+                NotificationCenter.default.post(name: .stopMetronome, object: nil)
+            }
             if newValue != 2 {
                 NotificationCenter.default.post(name: .stopToneGenerator, object: nil)
             }
