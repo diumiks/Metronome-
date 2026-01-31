@@ -53,6 +53,8 @@ struct MetronomeView: View {
     
     let impactMed = UIImpactFeedbackGenerator(style: .medium)
     let impactHeavy = UIImpactFeedbackGenerator(style: .heavy)
+    private let hapticCooldown: TimeInterval = 0.05
+    @State private var lastHapticTime: Date = .distantPast
     
     var body: some View {
         // [修改 1] 使用 NavigationStack 替代 NavigationView
@@ -271,7 +273,11 @@ struct MetronomeView: View {
     func adjustBpm(_ amount: Double) {
         bpm = max(AudioConstants.minBPM, min(AudioConstants.maxBPM, bpm + amount))
         if hapticEnabled {
-            impactMed.impactOccurred()
+            let now = Date()
+            if now.timeIntervalSince(lastHapticTime) >= hapticCooldown {
+                impactMed.impactOccurred()
+                lastHapticTime = now
+            }
         }
     }
     
