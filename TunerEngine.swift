@@ -29,6 +29,12 @@ class TunerEngine: ObservableObject {
     // 缓冲区调度控制
     private var shouldContinueScheduling = false
     
+    // 音高平滑处理
+    private var smoothedPitch: Double = 0
+    
+    // 节拍器可能使用的频率（用于过滤干扰）
+    private let metronomeFrequencies: [Double] = [1200, 800, 2000, 1500, 600, 400, 1000, 750, 1600]
+    
     struct TunerData {
         var pitch: Double = 0.0
         var amplitude: Double = 0.0
@@ -69,72 +75,21 @@ class TunerEngine: ObservableObject {
     }
     
     func setupAudioSession() {
-        do {
-            let session = AVAudioSession.sharedInstance()
-            
-            // 【优化】检查当前类别，避免不必要的重新设置
-            let currentCategory = session.category
-            let currentOptions = session.categoryOptions
-            
-            let needsSetup = !(
-                currentCategory == .playAndRecord &&
-                currentOptions.contains(.defaultToSpeaker) &&
-                currentOptions.contains(.mixWithOthers)
-            )
-            
-            if needsSetup {
-                // 【修改】不要停用当前音频会话，避免打断节拍器
-                // try? session.setActive(false, options: .notifyOthersOnDeactivation)
-                
-                // 【优化】添加短暂延迟，让之前的操作完成
-                Thread.sleep(forTimeInterval: 0.1)
-                
-                // 设置新的类别，使用 .mixWithOthers 确保不打断其他音频
-                try session.setCategory(
-                    .playAndRecord,
-                    mode: .default,
-                    options: [.defaultToSpeaker, .mixWithOthers]
-                )
-                
-                // 【新增】添加延迟后再激活
-                Thread.sleep(forTimeInterval: 0.05)
-            }
-            
-            // 【修改】激活时不打断其他音频
-            try session.setActive(true, options: .notifyOthersOnDeactivation)
-            
-            DispatchQueue.main.async {
-                self.errorMessage = nil
-            }
-        } catch let error as NSError {
-            print("⚠️ TunerEngine Audio Session Error: \(error.code) - \(error.localizedDescription)")
-            
-            // 忽略"正在使用"的错误
-            if error.code != AVAudioSession.ErrorCode.isBusy.rawValue &&
-               error.code != AVAudioSession.ErrorCode.cannotInterruptOthers.rawValue {
-                DispatchQueue.main.async {
-                    self.errorMessage = AudioError.sessionSetupFailed.localizedDescription
-                }
-            }
+        AudioSessionManager.shared.configureForPlayAndRecord()
+        DispatchQueue.main.async {
+            self.errorMessage = nil
         }
     }
     
     func startListening() {
         stopPlaying()
-        
-        // 【优化】增加延迟到 100ms，确保音频引擎完全停止
-        Thread.sleep(forTimeInterval: 0.1)
-        
-        if engine.isRunning { 
-            engine.stop() 
+        if engine.isRunning {
+            engine.stop()
         }
         engine.reset()
         
         // 【新增】在获取输入格式前先设置音频会话
         setupAudioSession()
-        
-        // 【新增】再次添加延迟，确保音频会话完全生效
-        Thread.sleep(forTimeInterval: 0.05)
         
         let format = mic.inputFormat(forBus: 0)
         guard format.sampleRate > 0 else {
@@ -370,7 +325,10 @@ class TunerEngine: ObservableObject {
         
         // 3. 噪音门限：只有音量大于阈值才更新音高
         // 【新增】提高阈值，过滤掉节拍器的短促音
-        let dynamicThreshold = AudioConstants.rmsThreshold * 1.5  // 提高 50% 阈值
+        let isMetronomeRunning = MetronomeStateManager.shared.isPlaying
+        let dynamicThreshold = isMetronomeRunning
+        ? AudioConstants.rmsThreshold * 1.8
+        : AudioConstants.rmsThreshold * 1.3
         
         if Double(rms) > dynamicThreshold {
             analyzePitch(frequency: frequency, amplitude: Double(rms))
@@ -389,12 +347,35 @@ class TunerEngine: ObservableObject {
             return
         }
         
+        // 【优化 1.1】如果节拍器正在播放，过滤接近节拍器频率的突刺
+        if MetronomeStateManager.shared.isPlaying {
+            let isNearMetronomeTone = metronomeFrequencies.contains { abs(frequency - $0) < 25.0 }
+            if isNearMetronomeTone && amplitude < 0.55 {
+                return
+            }
+            
+            // 节拍瞬间抑制（减少抖动）
+            if MetronomeStateManager.shared.isVisualPulse && amplitude < 0.45 {
+                return
+            }
+        }
+        
         // 【优化 2】过滤掉人耳听不到的极端频率
         guard frequency > AudioConstants.minFrequency && frequency < AudioConstants.maxFrequency else { return }
         
         let baseFreq = self.standardFrequency
         
-        let semitones = 12.0 * log2(frequency / baseFreq)
+        // 【优化 3】音高平滑处理，减少节拍器影响下的抖动
+        let smoothingFactor = MetronomeStateManager.shared.isPlaying ? 0.2 : 0.35
+        if smoothedPitch == 0 {
+            smoothedPitch = frequency
+        } else {
+            smoothedPitch += (frequency - smoothedPitch) * smoothingFactor
+        }
+        
+        let stableFrequency = smoothedPitch
+        
+        let semitones = 12.0 * log2(stableFrequency / baseFreq)
         let noteNumDouble = semitones + 69.0
         let roundedNoteNum = Int(round(noteNumDouble))
         let diff = noteNumDouble - Double(roundedNoteNum)
@@ -404,7 +385,7 @@ class TunerEngine: ObservableObject {
         if index < 0 { index += 12 }
         
         DispatchQueue.main.async {
-            self.data.pitch = frequency
+            self.data.pitch = stableFrequency
             self.data.noteName = self.noteNames[index]
             self.data.deviation = deviationCents
             self.data.amplitude = amplitude

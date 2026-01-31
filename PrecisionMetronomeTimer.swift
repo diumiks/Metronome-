@@ -52,17 +52,7 @@ class PrecisionMetronomeTimer {
     
     /// 设置音频会话
     private func setupAudio() {
-        do {
-            let session = AVAudioSession.sharedInstance()
-            // 【优化】添加 .mixWithOthers 选项，允许与其他音频混音
-            // 这样用户可以边听音乐边用节拍器
-            try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
-            try session.setActive(true)
-            print("✅ 音频会话初始化成功")
-        } catch {
-            print("❌ 音频会话失败: \(error.localizedDescription)")
-            // 【新增】错误通知机制（可选：通过回调通知 UI）
-        }
+        AudioSessionManager.shared.configureForPlayAndRecord()
     }
     
     /// 创建音频节点（只创建一次）

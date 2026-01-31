@@ -12,6 +12,7 @@ class ToneGeneratorEngine: ObservableObject {
     
     // 音频处理队列 - 使用串行队列确保操作顺序
     private let audioQueue = DispatchQueue(label: "com.tonegenerator.audio", qos: .userInitiated)
+    private let audioQueueKey = DispatchSpecificKey<Void>()
     
     // 线程安全锁
     private let lock = NSLock()
@@ -27,6 +28,7 @@ class ToneGeneratorEngine: ObservableObject {
         player = AVAudioPlayerNode()
         engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: nil)
+        audioQueue.setSpecific(key: audioQueueKey, value: ())
         
         // 不在初始化时设置音频会话
         // 延迟到真正需要播放时设置
@@ -44,48 +46,9 @@ class ToneGeneratorEngine: ObservableObject {
     }
     
     func setupAudioSession() {
-        do {
-            let session = AVAudioSession.sharedInstance()
-            
-            // 【优化 1】先尝试获取当前类别，如果已经正确就不重新设置
-            let currentCategory = session.category
-            let currentOptions = session.categoryOptions
-            
-            // 如果当前是 playback 或 playAndRecord，且有 mixWithOthers，就不重新设置
-            let needsSetup = !(
-                (currentCategory == .playback || currentCategory == .playAndRecord) &&
-                currentOptions.contains(.mixWithOthers)
-            )
-            
-            if needsSetup {
-                // 只需要播放，使用 .playback 类别
-                // .mixWithOthers 允许与节拍器等其他音频混音
-                try session.setCategory(
-                    .playback,
-                    mode: .default,
-                    options: [.mixWithOthers]
-                )
-            }
-            
-            // 【优化 2】激活音频会话时增加延迟和错误处理
-            if !session.isOtherAudioPlaying {
-                try session.setActive(true, options: [])
-            }
-            
-            DispatchQueue.main.async {
-                self.errorMessage = nil
-            }
-        } catch let error as NSError {
-            // 【优化 3】区分不同的错误类型
-            print("⚠️ Audio Session Error: \(error.code) - \(error.localizedDescription)")
-            
-            // 如果是"正在使用"或"被打断"的错误，不显示给用户
-            if error.code != AVAudioSession.ErrorCode.isBusy.rawValue &&
-               error.code != AVAudioSession.ErrorCode.cannotInterruptOthers.rawValue {
-                DispatchQueue.main.async {
-                    self.errorMessage = "音频会话设置失败"
-                }
-            }
+        AudioSessionManager.shared.configureForPlayAndRecord()
+        DispatchQueue.main.async {
+            self.errorMessage = nil
         }
     }
     
@@ -161,7 +124,7 @@ class ToneGeneratorEngine: ObservableObject {
     
     /// 停止播放
     func stopPlaying() {
-        audioQueue.async { [weak self] in
+        performOnAudioQueue { [weak self] in
             guard let self = self else { return }
             
             self.lock.lock()
@@ -172,6 +135,13 @@ class ToneGeneratorEngine: ObservableObject {
             
             // 停止播放器
             self.player.stop()
+            self.player.reset()
+            
+            // 立即停止引擎，避免缓冲区继续播放
+            if self.engine.isRunning {
+                self.engine.stop()
+            }
+            self.engine.reset()
             
             DispatchQueue.main.async {
                 self.isPlaying = false
@@ -200,6 +170,14 @@ class ToneGeneratorEngine: ObservableObject {
             // 每个缓冲区播放完成后，递归调度下一个
             // 这样就能无限循环播放
             self.scheduleNextBuffer(buffer)
+        }
+    }
+    
+    private func performOnAudioQueue(_ work: @escaping () -> Void) {
+        if DispatchQueue.getSpecific(key: audioQueueKey) != nil {
+            work()
+        } else {
+            audioQueue.sync(execute: work)
         }
     }
     

@@ -270,12 +270,7 @@ struct MetronomeView: View {
     }
     
     func startMetronome() {
-        // 【新增】确保音频会话处于激活状态
-        do {
-            try AVAudioSession.sharedInstance().setActive(true)
-        } catch {
-            print("⚠️ 音频会话激活失败: \(error)")
-        }
+        AudioSessionManager.shared.configureForPlayAndRecord()
         
         // 更新全局状态
         MetronomeStateManager.shared.start(timeSignature: timeSignature)
