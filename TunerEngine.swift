@@ -31,6 +31,7 @@ class TunerEngine: ObservableObject {
     
     // 音高平滑处理
     private var smoothedPitch: Double = 0
+    private var silenceFrameCount = 0
     
     // 节拍器可能使用的频率（用于过滤干扰）
     private let metronomeFrequencies: [Double] = [1200, 800, 2000, 1500, 600, 400, 1000, 750, 1600]
@@ -327,12 +328,17 @@ class TunerEngine: ObservableObject {
         // 【新增】提高阈值，过滤掉节拍器的短促音
         let isMetronomeRunning = MetronomeStateManager.shared.isPlaying
         let dynamicThreshold = isMetronomeRunning
-        ? AudioConstants.rmsThreshold * 2.2
-        : AudioConstants.rmsThreshold * 1.5
+        ? AudioConstants.rmsThreshold * 1.6
+        : AudioConstants.rmsThreshold * 1.0
         
         if Double(rms) > dynamicThreshold {
+            silenceFrameCount = 0
             analyzePitch(frequency: frequency, amplitude: Double(rms))
         } else {
+            silenceFrameCount += 1
+            if silenceFrameCount >= 3 {
+                smoothedPitch = 0
+            }
             DispatchQueue.main.async { self.data.amplitude = Double(rms) }
         }
     }
@@ -366,7 +372,7 @@ class TunerEngine: ObservableObject {
         let baseFreq = self.standardFrequency
         
         // 【优化 3】音高平滑处理，减少节拍器影响下的抖动
-        let smoothingFactor = MetronomeStateManager.shared.isPlaying ? 0.12 : 0.22
+        let smoothingFactor = MetronomeStateManager.shared.isPlaying ? 0.2 : 0.35
         if smoothedPitch == 0 {
             smoothedPitch = frequency
         } else {
