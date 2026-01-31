@@ -5,7 +5,6 @@ struct SettingsView: View {
     @AppStorage(UserDefaultsKeys.soundEnabled) private var soundEnabled = true
     @AppStorage(UserDefaultsKeys.hapticEnabled) private var hapticEnabled = true
     @AppStorage(UserDefaultsKeys.keepScreenAwake) private var keepScreenAwake = false
-    @AppStorage(UserDefaultsKeys.autoStopListening) private var autoStopListening = true
     
     // 标准频率管理
     @State private var standardFrequency: Double = 440.0
@@ -35,8 +34,6 @@ struct SettingsView: View {
                     
                     // --- 校音器设置 ---
                     Section(header: Text("校音器")) {
-                        Toggle("切换页面时自动停止监听", isOn: $autoStopListening)
-                        
                         // 标准频率设置
                         Button {
                             showManageSheet = true

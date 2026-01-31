@@ -12,7 +12,8 @@ struct TunerView: View {
     @State private var showManageSheet = false
     
     // 读取用户设置
-    @AppStorage(UserDefaultsKeys.autoStopListening) private var autoStopListening = true
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var isVisible = false
     
     let defaultFrequencies = [440.0, 442.0]
     
@@ -81,13 +82,26 @@ struct TunerView: View {
                 }
             }
             .onAppear {
+                isVisible = true
                 tuner.startListening()
                 loadSavedFrequencies()
+                NotificationCenter.default.post(name: .stopMetronome, object: nil)
             }
             .onDisappear {
+                isVisible = false
                 tuner.stopPlaying()
-                if autoStopListening {
+                tuner.stopListening()
+            }
+            .onChange(of: scenePhase) { _, newPhase in
+                switch newPhase {
+                case .background, .inactive:
                     tuner.stopListening()
+                case .active:
+                    if isVisible {
+                        tuner.startListening()
+                    }
+                default:
+                    break
                 }
             }
             .sheet(isPresented: $showManageSheet) {

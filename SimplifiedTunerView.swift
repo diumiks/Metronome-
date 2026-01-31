@@ -1,15 +1,13 @@
 import SwiftUI
 
-import SwiftUI
-
 /// 简化版校音器视图 - 只负责麦克风监听和音高显示
 struct SimplifiedTunerView: View {
     @StateObject private var tuner = TunerEngine()
     
     // 读取用户设置
-    @AppStorage(UserDefaultsKeys.autoStopListening) private var autoStopListening = true
-    
     @Environment(\.colorScheme) var colorScheme
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var isVisible = false
     
     var body: some View {
         NavigationStack {
@@ -131,11 +129,24 @@ struct SimplifiedTunerView: View {
             .navigationTitle("校音器")
             .navigationBarTitleDisplayMode(.large)
             .onAppear {
+                isVisible = true
                 tuner.startListening()
+                NotificationCenter.default.post(name: .stopMetronome, object: nil)
             }
             .onDisappear {
-                if autoStopListening {
+                isVisible = false
+                tuner.stopListening()
+            }
+            .onChange(of: scenePhase) { _, newPhase in
+                switch newPhase {
+                case .background, .inactive:
                     tuner.stopListening()
+                case .active:
+                    if isVisible {
+                        tuner.startListening()
+                    }
+                default:
+                    break
                 }
             }
         }

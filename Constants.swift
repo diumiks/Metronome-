@@ -13,13 +13,13 @@ struct AudioConstants {
     
     // 校音器相关
     static let standardA4Frequency: Double = 440.0
-    static let minFrequency: Double = 80.0
-    static let maxFrequency: Double = 1200.0
+    static let minFrequency: Double = 50.0
+    static let maxFrequency: Double = 2000.0
     
     // 音频处理参数
     static let sampleRate: Double = 44100.0
-    static let bufferSize: AVAudioFrameCount = 2048  // 改为 AVAudioFrameCount 类型
-    static let rmsThreshold: Double = 0.01  // 改为 Double 以避免类型转换问题
+    static let bufferSize: AVAudioFrameCount = 1024  // 改为 AVAudioFrameCount 类型
+    static let rmsThreshold: Double = 0.008  // 改为 Double 以避免类型转换问题
 }
 
 // MARK: - UI 常量
@@ -51,7 +51,6 @@ struct UserDefaultsKeys {
     
     // 校音器相关
     static let lastStandardFrequency = "lastStandardFrequency"
-    static let autoStopListening = "autoStopListening"
     static let userFrequencies = "userFrequencies"  // 用户自定义频率列表
     
     // 通用设置
@@ -92,4 +91,5 @@ enum AudioError: Error {
 
 extension Notification.Name {
     static let stopToneGenerator = Notification.Name("stopToneGenerator")
+    static let stopMetronome = Notification.Name("stopMetronome")
 }
