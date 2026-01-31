@@ -310,20 +310,6 @@ class TunerEngine: ObservableObject {
         }
         let rms = sqrt(sum / Float(frameLength))
         
-        // 2. 计算过零率 (Zero-Crossing)
-        // 这种算法比 FFT 简单，它是通过数波形穿过 0 轴的次数来估算频率
-        var zeroCrossings = 0
-        var previousSign = localBuffer[0] > 0
-        for sample in localBuffer {
-            let currentSign = sample > 0
-            if currentSign != previousSign {
-                zeroCrossings += 1
-                previousSign = currentSign
-            }
-        }
-        
-        let frequency = Double(zeroCrossings) * buffer.format.sampleRate / (2.0 * Double(frameLength))
-        
         // 3. 噪音门限：只有音量大于阈值才更新音高
         // 【新增】提高阈值，过滤掉节拍器的短促音
         let isMetronomeRunning = MetronomeStateManager.shared.isPlaying
@@ -333,7 +319,15 @@ class TunerEngine: ObservableObject {
         
         if Double(rms) > dynamicThreshold {
             silenceFrameCount = 0
-            analyzePitch(frequency: frequency, amplitude: Double(rms))
+            if let frequency = estimatePitch(buffer: localBuffer, sampleRate: buffer.format.sampleRate) {
+                analyzePitch(frequency: frequency, amplitude: Double(rms))
+            } else {
+                silenceFrameCount += 1
+                if silenceFrameCount >= 3 {
+                    smoothedPitch = 0
+                }
+                DispatchQueue.main.async { self.data.amplitude = Double(rms) }
+            }
         } else {
             silenceFrameCount += 1
             if silenceFrameCount >= 3 {
@@ -341,6 +335,79 @@ class TunerEngine: ObservableObject {
             }
             DispatchQueue.main.async { self.data.amplitude = Double(rms) }
         }
+    }
+
+    private func estimatePitch(buffer: [Float], sampleRate: Double) -> Double? {
+        let frameLength = buffer.count
+        guard frameLength > 1 else { return nil }
+        
+        // 去除直流分量并加窗，提升自相关稳定性
+        var mean: Float = 0
+        for sample in buffer {
+            mean += sample
+        }
+        mean /= Float(frameLength)
+        
+        var windowed = [Float](repeating: 0, count: frameLength)
+        if frameLength == 1 {
+            windowed[0] = buffer[0] - mean
+        } else {
+            for i in 0..<frameLength {
+                let window = 0.5 - 0.5 * cos(2.0 * .pi * Double(i) / Double(frameLength - 1))
+                windowed[i] = (buffer[i] - mean) * Float(window)
+            }
+        }
+        
+        let minLag = max(Int(sampleRate / AudioConstants.maxFrequency), 1)
+        let maxLag = min(Int(sampleRate / AudioConstants.minFrequency), frameLength - 1)
+        guard maxLag > minLag else { return nil }
+        
+        func normalizedCorrelation(lag: Int) -> Float {
+            var sum: Float = 0
+            var energy1: Float = 0
+            var energy2: Float = 0
+            let upper = frameLength - lag
+            if upper <= 0 { return 0 }
+            for i in 0..<upper {
+                let x = windowed[i]
+                let y = windowed[i + lag]
+                sum += x * y
+                energy1 += x * x
+                energy2 += y * y
+            }
+            let denom = sqrt(energy1 * energy2) + 1e-9
+            return sum / denom
+        }
+        
+        var bestLag = minLag
+        var bestCorrelation: Float = -1
+        for lag in minLag...maxLag {
+            let corr = normalizedCorrelation(lag: lag)
+            if corr > bestCorrelation {
+                bestCorrelation = corr
+                bestLag = lag
+            }
+        }
+        
+        // 相关度过低视为无稳定音高
+        if bestCorrelation < 0.2 {
+            return nil
+        }
+        
+        // 抛物线插值提升精度
+        var refinedLag = Double(bestLag)
+        if bestLag > minLag && bestLag < maxLag {
+            let c1 = Double(normalizedCorrelation(lag: bestLag - 1))
+            let c2 = Double(bestCorrelation)
+            let c3 = Double(normalizedCorrelation(lag: bestLag + 1))
+            let denom = (2.0 * c2 - c1 - c3)
+            if abs(denom) > 1e-6 {
+                let delta = 0.5 * (c1 - c3) / denom
+                refinedLag += delta
+            }
+        }
+        
+        return sampleRate / refinedLag
     }
     
     private func analyzePitch(frequency: Double, amplitude: Double) {
