@@ -414,10 +414,12 @@ class TunerEngine: ObservableObject {
             return sum / denom
         }
         
+        var correlations = [Float](repeating: 0, count: maxLag + 1)
         var bestLag = minLag
         var bestCorrelation: Float = -1
         for lag in minLag...maxLag {
             let corr = normalizedCorrelation(lag: lag)
+            correlations[lag] = corr
             if corr > bestCorrelation {
                 bestCorrelation = corr
                 bestLag = lag
@@ -428,13 +430,31 @@ class TunerEngine: ObservableObject {
         if bestCorrelation < 0.2 {
             return nil
         }
+
+        var firstPeakLag: Int?
+        if maxLag - minLag >= 2 {
+            for lag in (minLag + 1)..<maxLag {
+                let prev = correlations[lag - 1]
+                let curr = correlations[lag]
+                let next = correlations[lag + 1]
+                if curr > 0.3 && curr > prev && curr > next {
+                    firstPeakLag = lag
+                    break
+                }
+            }
+        }
+        
+        if let peakLag = firstPeakLag, correlations[peakLag] >= bestCorrelation * 0.85 {
+            bestLag = peakLag
+            bestCorrelation = correlations[peakLag]
+        }
         
         // 抛物线插值提升精度
         var refinedLag = Double(bestLag)
         if bestLag > minLag && bestLag < maxLag {
-            let c1 = Double(normalizedCorrelation(lag: bestLag - 1))
+            let c1 = Double(correlations[bestLag - 1])
             let c2 = Double(bestCorrelation)
-            let c3 = Double(normalizedCorrelation(lag: bestLag + 1))
+            let c3 = Double(correlations[bestLag + 1])
             let denom = (2.0 * c2 - c1 - c3)
             if abs(denom) > 1e-6 {
                 let delta = 0.5 * (c1 - c3) / denom
