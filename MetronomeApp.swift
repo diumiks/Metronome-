@@ -14,6 +14,11 @@ struct MetronomeApp: App {
     @Environment(\.scenePhase) var scenePhase
     @StateObject private var appState = AppState()
     
+    init() {
+        // ✅ App 启动时立即初始化音频会话
+        _ = AudioSessionManager.shared
+    }
+    
     var body: some Scene {
         WindowGroup {
             ContentView()

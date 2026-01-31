@@ -229,9 +229,9 @@ struct FrequencyManageSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("完成") { 
+                    Button("完成") {
                         onSave?()  // 触发保存回调
-                        dismiss() 
+                        dismiss()
                     }
                 }
             }

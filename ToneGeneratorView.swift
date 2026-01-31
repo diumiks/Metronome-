@@ -95,7 +95,7 @@ struct ToneGeneratorView: View {
                             
                             HStack(spacing: 0) {
                                 Button {
-                                    if selectedOctave > 1 { 
+                                    if selectedOctave > 1 {
                                         withAnimation { selectedOctave -= 1 }
                                     }
                                 } label: {
@@ -117,7 +117,7 @@ struct ToneGeneratorView: View {
                                 Spacer()
                                 
                                 Button {
-                                    if selectedOctave < 7 { 
+                                    if selectedOctave < 7 {
                                         withAnimation { selectedOctave += 1 }
                                     }
                                 } label: {

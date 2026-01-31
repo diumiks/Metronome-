@@ -2,536 +2,361 @@ import SwiftUI
 import AVFoundation
 import Combine
 
-class TunerEngine: ObservableObject {
-    private var engine: AVAudioEngine
-    private var mic: AVAudioInputNode
-    private var player: AVAudioPlayerNode
-    
-    let noteNames = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
-    
+final class TunerEngine: ObservableObject {
+    private let audioQueue = DispatchQueue(label: "com.metronomeapp.tuner.audio", qos: .userInitiated)
+    private let lock = NSLock()
+
+    private let engine = AVAudioEngine()
+    private let player = AVAudioPlayerNode()
+    private var mic: AVAudioInputNode { engine.inputNode }
+
+    let noteNames = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"]
+
     @Published var data = TunerData()
-    @Published var isPlaying = false
+    @Published var isPlaying: Bool = false
     @Published var standardFrequency: Double = 440.0
     @Published var errorMessage: String?
-    
-    // 性能优化：复用缓冲区
+
+    private var isListening = false
     private var sampleBuffer: [Float] = []
-    
-    // 音频处理队列 - 使用串行队列确保操作顺序
-    private let audioQueue = DispatchQueue(label: "com.tuner.audio", qos: .userInitiated)
-    
-    // 线程安全锁
-    private let lock = NSLock()
-    
-    // 当前播放频率，用于热切换
-    private var currentPlayingFrequency: Double = 0
-    
-    // 缓冲区调度控制
-    private var shouldContinueScheduling = false
-    
-    // 音高平滑处理
+
+    // 追踪状态
     private var smoothedPitch: Double = 0
     private var silenceFrameCount = 0
-    private var isListening = false
     private var recentPitchEstimates: [Double] = []
-    private let maxPitchHistory = 5
-    
-    // 节拍器可能使用的频率（用于过滤干扰）
-    private let metronomeFrequencies: [Double] = [1200, 800, 2000, 1500, 600, 400, 1000, 750, 1600]
-    
+    private let maxPitchHistory = 2
+
+    private var pendingJumpPitch: Double = 0
+    private var pendingJumpCount: Int = 0
+
+    private var noiseFloorRMS: Double = 0
+    private let noiseFloorAlpha: Double = 0.96
+
     struct TunerData {
-        var pitch: Double = 0.0
-        var amplitude: Double = 0.0
+        var pitch: Double = 0
+        var amplitude: Double = 0
         var noteName: String = "--"
-        var deviation: Double = 0.0
+        var deviation: Double = 0
     }
-    
+
     init() {
-        engine = AVAudioEngine()
-        mic = engine.inputNode
-        player = AVAudioPlayerNode()
+        let saved = UserDefaults.standard.double(forKey: UserDefaultsKeys.lastStandardFrequency)
+        if saved > 0 { standardFrequency = saved }
+
         engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: nil)
-        
-        // 加载上次的标准频率
-        let savedFreq = UserDefaults.standard.double(forKey: UserDefaultsKeys.lastStandardFrequency)
-        if savedFreq > 0 {
-            standardFrequency = savedFreq
-        }
-        
-        setupAudioSession()
+
+        AudioSessionManager.shared.configureForPlayAndRecord(mode: .default)
     }
-    
+
     deinit {
-        // 保存标准频率
         UserDefaults.standard.set(standardFrequency, forKey: UserDefaultsKeys.lastStandardFrequency)
-        
-        // 【新增】清理音频资源
         stopPlaying()
         stopListening()
-        
-        // 停止引擎
-        if engine.isRunning {
-            engine.stop()
-        }
-        
-        print("🧹 TunerEngine 已清理")
     }
-    
-    func setupAudioSession() {
-        AudioSessionManager.shared.configureForPlayAndRecord()
-        DispatchQueue.main.async {
-            self.errorMessage = nil
-        }
-    }
-    
+
+    // MARK: - Listening
+
     func startListening() {
         audioQueue.async { [weak self] in
-            guard let self = self else { return }
-            
+            guard let self else { return }
+
             self.lock.lock()
             defer { self.lock.unlock() }
-            
-            guard !self.isListening else { return }
+
+            if self.isListening || self.isPlaying { return }
             self.isListening = true
-            
-            self.shouldContinueScheduling = false
-            self.player.stop()
-            DispatchQueue.main.async {
-                self.isPlaying = false
-            }
-            if self.engine.isRunning {
-                self.engine.stop()
-            }
-            self.engine.reset()
-            
-            // 【新增】在获取输入格式前先设置音频会话
-            self.setupAudioSession()
-            
+
+            AudioSessionManager.shared.beginTunerSession()
+
+            self.mic.removeTap(onBus: 0)
             let format = self.mic.inputFormat(forBus: 0)
             guard format.sampleRate > 0 else {
-                print("❌ Invalid microphone format: sampleRate = \(format.sampleRate)")
-                DispatchQueue.main.async {
-                    self.errorMessage = AudioError.deviceNotAvailable.localizedDescription
-                }
+                DispatchQueue.main.async { self.errorMessage = AudioError.deviceNotAvailable.localizedDescription }
                 self.isListening = false
+                AudioSessionManager.shared.endTunerSession()
                 return
             }
-            
-            print("✅ Microphone format: \(format.sampleRate) Hz, \(format.channelCount) channels")
-            
-            self.mic.removeTap(onBus: 0)
-            
-            // 使用常量配置缓冲区大小
-            self.mic.installTap(onBus: 0, bufferSize: AudioConstants.bufferSize, format: format) { [weak self] (buffer, _) in
+
+            self.mic.installTap(onBus: 0, bufferSize: AudioConstants.bufferSize, format: format) { [weak self] buffer, _ in
                 self?.processAudio(buffer: buffer)
             }
-            
-            do {
-                try self.engine.start()
-                DispatchQueue.main.async {
-                    self.errorMessage = nil
+
+            if !self.engine.isRunning {
+                do { try self.engine.start() }
+                catch {
+                    DispatchQueue.main.async { self.errorMessage = AudioError.engineStartFailed.localizedDescription }
+                    self.mic.removeTap(onBus: 0)
+                    self.isListening = false
+                    AudioSessionManager.shared.endTunerSession()
+                    return
                 }
-            } catch {
-                print("⚠️ TunerEngine start error: \(error)")
-                DispatchQueue.main.async {
-                    self.errorMessage = AudioError.engineStartFailed.localizedDescription
-                }
-                self.isListening = false
             }
+
+            DispatchQueue.main.async { self.errorMessage = nil }
         }
     }
-    
+
     func stopListening() {
         audioQueue.async { [weak self] in
-            guard let self = self else { return }
-            
+            guard let self else { return }
+
             self.lock.lock()
             defer { self.lock.unlock() }
-            
-            self.mic.removeTap(onBus: 0)
-            self.engine.stop()
+
+            guard self.isListening else { return }
             self.isListening = false
-            self.recentPitchEstimates.removeAll()
-            self.smoothedPitch = 0
-            
+
+            self.mic.removeTap(onBus: 0)
+            self.resetTrackingState()
+
+            AudioSessionManager.shared.endTunerSession()
+
             DispatchQueue.main.async { self.data = TunerData() }
         }
     }
-    
+
+    private func resetTrackingState() {
+        recentPitchEstimates.removeAll()
+        smoothedPitch = 0
+        silenceFrameCount = 0
+        pendingJumpPitch = 0
+        pendingJumpCount = 0
+        noiseFloorRMS = 0
+    }
+
+    // MARK: - Tone
+
     func playTone(frequency: Double) {
-        // 防止重复调用相同频率
-        if isPlaying && abs(frequency - currentPlayingFrequency) < 0.1 {
-            return
-        }
-        
-        currentPlayingFrequency = frequency
-        
-        // 在音频队列中执行，确保线程安全
         audioQueue.async { [weak self] in
-            guard let self = self else { return }
-            
+            guard let self else { return }
+
             self.lock.lock()
             defer { self.lock.unlock() }
-            
-            // 停止调度循环
-            self.shouldContinueScheduling = false
-            
-            // 停止监听
-            if self.mic.numberOfInputs > 0 {
+
+            // 播放音时，停止监听
+            if self.isListening {
+                self.isListening = false
                 self.mic.removeTap(onBus: 0)
+                self.resetTrackingState()
+                AudioSessionManager.shared.endTunerSession()
             }
-            
-            // 停止播放器
-            self.player.stop()
-            
-            // 停止引擎（移除 sleep，AVAudioEngine.stop() 是同步的）
-            if self.engine.isRunning {
-                self.engine.stop()
-            }
-            
-            // 断开连接
-            self.engine.disconnectNodeOutput(self.player)
-            
-            // 创建新的音频格式和缓冲区
-            let format = AVAudioFormat(standardFormatWithSampleRate: AudioConstants.sampleRate, channels: 1)!
-            guard let buffer = self.createSineWave(frequency: frequency, sampleRate: AudioConstants.sampleRate, format: format) else {
-                DispatchQueue.main.async {
-                    self.errorMessage = "创建音频缓冲区失败"
-                    self.isPlaying = false
+
+            if !self.engine.isRunning {
+                do { try self.engine.start() }
+                catch {
+                    DispatchQueue.main.async { self.errorMessage = AudioError.engineStartFailed.localizedDescription }
+                    return
                 }
+            }
+
+            guard let format = AVAudioFormat(standardFormatWithSampleRate: AudioConstants.sampleRate, channels: 1),
+                  let buffer = self.createSineWave(frequency: frequency, sampleRate: AudioConstants.sampleRate, format: format)
+            else {
+                DispatchQueue.main.async { self.errorMessage = "创建音频缓冲区失败" }
                 return
             }
-            
-            // 重新连接
-            self.engine.connect(self.player, to: self.engine.mainMixerNode, format: format)
-            
-            do {
-                try self.engine.start()
-                
-                // 启动调度循环
-                self.shouldContinueScheduling = true
-                self.scheduleBufferLoop(buffer: buffer)
-                
-                // 开始播放
-                self.player.play()
-                
-                DispatchQueue.main.async {
-                    self.isPlaying = true
-                    self.errorMessage = nil
-                }
-            } catch {
-                print("Engine start error: \(error)")
-                DispatchQueue.main.async {
-                    self.errorMessage = AudioError.engineStartFailed.localizedDescription
-                    self.isPlaying = false
-                }
+
+            self.player.stop()
+            self.player.scheduleBuffer(buffer, at: nil, options: .loops, completionHandler: nil)
+            self.player.play()
+
+            DispatchQueue.main.async {
+                self.isPlaying = true
+                self.errorMessage = nil
             }
         }
     }
-    
-    private func scheduleBufferLoop(buffer: AVAudioPCMBuffer) {
-        guard shouldContinueScheduling else { return }
-        
-        // 预先调度5个缓冲区，每个完成后会触发回调补充
-        for _ in 0..<5 {
-            scheduleNextBuffer(buffer)
-        }
-    }
-    
-    private func scheduleNextBuffer(_ buffer: AVAudioPCMBuffer) {
-        // 关键修复：只检查 shouldContinueScheduling，不检查 isPlaying
-        // 因为 isPlaying 可能在主线程更新有延迟
-        guard shouldContinueScheduling else { return }
-        
-        player.scheduleBuffer(buffer) { [weak self] in
-            guard let self = self else { return }
-            // 关键：每个缓冲区播放完成后，递归调度下一个
-            // 这样就能无限循环播放
-            self.scheduleNextBuffer(buffer)
-        }
-    }
-    
+
     func stopPlaying() {
         audioQueue.async { [weak self] in
-            guard let self = self else { return }
-            
-            self.lock.lock()
-            defer { self.lock.unlock() }
-            
-            // 停止调度循环
-            self.shouldContinueScheduling = false
-            
-            // 停止播放器
+            guard let self else { return }
             self.player.stop()
-            
-            DispatchQueue.main.async {
-                self.isPlaying = false
-            }
+            DispatchQueue.main.async { self.isPlaying = false }
         }
     }
-    
+
     private func createSineWave(frequency: Double, sampleRate: Double, format: AVAudioFormat) -> AVAudioPCMBuffer? {
-        // 精确生成正弦波，消除相位不连续导致的杂音
-        
-        let samplesPerCycle = sampleRate / frequency
-        
-        // 计算需要多少个完整周期才能让缓冲区足够长（约0.5秒）
         let desiredDuration: Double = 0.5
-        let cycles = round(desiredDuration * frequency)
-        
-        // 帧数 = 周期数 × 每周期采样点数
-        let frameCount = AVAudioFrameCount(cycles * samplesPerCycle)
-        
+        let frameCount = AVAudioFrameCount(sampleRate * desiredDuration)
+
         guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else { return nil }
         buffer.frameLength = frameCount
-        
         guard let channels = buffer.floatChannelData else { return nil }
+
         let samples = channels[0]
-        
-        // 关键修复：使用周期归一化的方式生成波形
-        // 确保最后一个采样点和第一个采样点相位连续
-        let totalSamples = Int(frameCount)
-        
-        for i in 0..<totalSamples {
-            // 方法1：基于总周期数归一化（更精确）
-            // 将整个缓冲区分成 cycles 个完整周期
-            let normalizedPosition = Double(i) / Double(totalSamples)  // 0.0 到 1.0
-            let phase = 2.0 * .pi * cycles * normalizedPosition
-            let sample = Float(sin(phase)) * 0.5
-            samples[i] = sample
+        let total = Int(frameCount)
+        let twoPiF = 2.0 * Double.pi * frequency
+
+        for i in 0..<total {
+            let t = Double(i) / sampleRate
+            samples[i] = Float(sin(twoPiF * t)) * 0.5
         }
-        
-        #if DEBUG
-        // 验证相位连续性（仅在调试模式）
-        let firstSample = samples[0]
-        let lastSample = samples[totalSamples - 1]
-        let continuityError = abs(lastSample - firstSample)
-        
-        if continuityError > 0.001 {
-            print("⚠️ 频率 \(String(format: "%.2f", frequency))Hz - 相位差: \(String(format: "%.6f", continuityError))")
-        }
-        #endif
-        
         return buffer
     }
-    
+
+    // MARK: - Audio processing
+
     private func processAudio(buffer: AVAudioPCMBuffer) {
+        guard isListening else { return }
         guard let channelData = buffer.floatChannelData?[0] else { return }
-        let frameLength = Int(buffer.frameLength)
-        let isMetronomePulse = MetronomeStateManager.shared.isPlaying && MetronomeStateManager.shared.isVisualPulse
-        
-        // 性能优化：在栈上创建临时缓冲区，避免竞争条件
-        // 由于音频回调在专用线程，使用局部变量更安全
-        var localBuffer = sampleBuffer
-        if localBuffer.count != frameLength {
-            localBuffer = [Float](repeating: 0, count: frameLength)
-            sampleBuffer = localBuffer  // 更新共享缓冲区
-        }
-        
-        // 复制数据到缓冲区
-        for i in 0..<frameLength {
-            localBuffer[i] = channelData[i]
-        }
-        
-        // 1. 计算 RMS (音量/振幅)
+        let n = Int(buffer.frameLength)
+        guard n > 0 else { return }
+
+        if sampleBuffer.count != n { sampleBuffer = [Float](repeating: 0, count: n) }
+        for i in 0..<n { sampleBuffer[i] = channelData[i] }
+
         var sum: Float = 0
-        for sample in localBuffer {
-            sum += sample * sample
+        for s in sampleBuffer { sum += s * s }
+        let rms = sqrt(sum / Float(n))
+        let amp = Double(rms)
+
+        DispatchQueue.main.async { self.data.amplitude = amp }
+
+        let baseThreshold = AudioConstants.rmsThreshold * 0.6
+        if amp < max(baseThreshold, noiseFloorRMS * 1.25) {
+            noiseFloorRMS = noiseFloorAlpha * noiseFloorRMS + (1.0 - noiseFloorAlpha) * amp
         }
-        let rms = sqrt(sum / Float(frameLength))
-        
-        // 3. 噪音门限：只有音量大于阈值才更新音高
-        // 【新增】提高阈值，过滤掉节拍器的短促音
-        let isMetronomeRunning = MetronomeStateManager.shared.isPlaying
-        let dynamicThreshold = isMetronomeRunning
-        ? AudioConstants.rmsThreshold * 1.6
-        : AudioConstants.rmsThreshold * 1.0
-        
-        if Double(rms) > dynamicThreshold {
-            silenceFrameCount = 0
-            if isMetronomePulse {
-                DispatchQueue.main.async { self.data.amplitude = Double(rms) }
-                return
-            }
-            if let frequency = estimatePitch(buffer: localBuffer, sampleRate: buffer.format.sampleRate) {
-                analyzePitch(frequency: frequency, amplitude: Double(rms))
-            } else {
-                silenceFrameCount += 1
-                if silenceFrameCount >= 3 {
-                    smoothedPitch = 0
-                }
-                DispatchQueue.main.async { self.data.amplitude = Double(rms) }
-            }
-        } else {
+        let gate = max(baseThreshold, noiseFloorRMS * 2.8)
+
+        guard amp > gate else {
             silenceFrameCount += 1
-            if silenceFrameCount >= 3 {
-                smoothedPitch = 0
-            }
-            DispatchQueue.main.async { self.data.amplitude = Double(rms) }
+            if silenceFrameCount >= 2 { smoothedPitch = 0 }
+            return
+        }
+        silenceFrameCount = 0
+
+        if let freq = estimatePitch(buffer: sampleBuffer, sampleRate: buffer.format.sampleRate) {
+            analyzePitch(frequency: freq, amplitude: amp)
         }
     }
 
     private func estimatePitch(buffer: [Float], sampleRate: Double) -> Double? {
-        let frameLength = buffer.count
-        guard frameLength > 1 else { return nil }
-        
-        // 去除直流分量并加窗，提升自相关稳定性
+        let n = buffer.count
+        guard n > 1 else { return nil }
+
         var mean: Float = 0
-        for sample in buffer {
-            mean += sample
-        }
-        mean /= Float(frameLength)
-        
-        var windowed = [Float](repeating: 0, count: frameLength)
-        if frameLength == 1 {
-            windowed[0] = buffer[0] - mean
-        } else {
-            for i in 0..<frameLength {
-                let window = 0.5 - 0.5 * cos(2.0 * .pi * Double(i) / Double(frameLength - 1))
-                windowed[i] = (buffer[i] - mean) * Float(window)
-            }
-        }
-        
-        let minLag = max(Int(sampleRate / AudioConstants.maxFrequency), 1)
-        let maxLag = min(Int(sampleRate / AudioConstants.minFrequency), frameLength - 1)
-        guard maxLag > minLag else { return nil }
-        
-        func normalizedCorrelation(lag: Int) -> Float {
-            var sum: Float = 0
-            var energy1: Float = 0
-            var energy2: Float = 0
-            let upper = frameLength - lag
-            if upper <= 0 { return 0 }
-            for i in 0..<upper {
-                let x = windowed[i]
-                let y = windowed[i + lag]
-                sum += x * y
-                energy1 += x * x
-                energy2 += y * y
-            }
-            let denom = sqrt(energy1 * energy2) + 1e-9
-            return sum / denom
-        }
-        
-        var correlations = [Float](repeating: 0, count: maxLag + 1)
-        var bestLag = minLag
-        var bestCorrelation: Float = -1
-        for lag in minLag...maxLag {
-            let corr = normalizedCorrelation(lag: lag)
-            correlations[lag] = corr
-            if corr > bestCorrelation {
-                bestCorrelation = corr
-                bestLag = lag
-            }
-        }
-        
-        // 相关度过低视为无稳定音高
-        if bestCorrelation < 0.2 {
-            return nil
+        for s in buffer { mean += s }
+        mean /= Float(n)
+
+        var x = [Float](repeating: 0, count: n)
+        for i in 0..<n {
+            let w = 0.5 - 0.5 * cos(2.0 * .pi * Double(i) / Double(n - 1))
+            x[i] = (buffer[i] - mean) * Float(w)
         }
 
-        var firstPeakLag: Int?
+        let minLag = max(Int(sampleRate / AudioConstants.maxFrequency), 1)
+        let maxLag = min(Int(sampleRate / AudioConstants.minFrequency), n - 1)
+        guard maxLag > minLag else { return nil }
+
+        func corr(_ lag: Int) -> Float {
+            var sum: Float = 0, e1: Float = 0, e2: Float = 0
+            let upper = n - lag
+            if upper <= 0 { return 0 }
+            for i in 0..<upper {
+                let a = x[i], b = x[i + lag]
+                sum += a * b
+                e1 += a * a
+                e2 += b * b
+            }
+            return sum / (sqrt(e1 * e2) + 1e-9)
+        }
+
+        var bestLag = minLag
+        var bestCorr: Float = -1
+        var correlations = [Float](repeating: 0, count: maxLag + 1)
+
+        for lag in minLag...maxLag {
+            let c = corr(lag)
+            correlations[lag] = c
+            if c > bestCorr { bestCorr = c; bestLag = lag }
+        }
+
+        if bestCorr < 0.18 { return nil }
+
+        var firstPeak: Int?
         if maxLag - minLag >= 2 {
             for lag in (minLag + 1)..<maxLag {
-                let prev = correlations[lag - 1]
-                let curr = correlations[lag]
-                let next = correlations[lag + 1]
-                if curr > 0.3 && curr > prev && curr > next {
-                    firstPeakLag = lag
-                    break
-                }
+                let p = correlations[lag - 1], c = correlations[lag], n = correlations[lag + 1]
+                if c > 0.28 && c > p && c > n { firstPeak = lag; break }
             }
         }
-        
-        if let peakLag = firstPeakLag, correlations[peakLag] >= bestCorrelation * 0.85 {
-            bestLag = peakLag
-            bestCorrelation = correlations[peakLag]
+        if let peak = firstPeak, correlations[peak] >= bestCorr * 0.85 {
+            bestLag = peak
+            bestCorr = correlations[peak]
         }
-        
-        // 抛物线插值提升精度
-        var refinedLag = Double(bestLag)
+
+        var refined = Double(bestLag)
         if bestLag > minLag && bestLag < maxLag {
             let c1 = Double(correlations[bestLag - 1])
-            let c2 = Double(bestCorrelation)
+            let c2 = Double(bestCorr)
             let c3 = Double(correlations[bestLag + 1])
-            let denom = (2.0 * c2 - c1 - c3)
+            let denom = (2 * c2 - c1 - c3)
             if abs(denom) > 1e-6 {
-                let delta = 0.5 * (c1 - c3) / denom
-                refinedLag += delta
+                refined += 0.5 * (c1 - c3) / denom
             }
         }
-        
-        return sampleRate / refinedLag
+
+        return sampleRate / refined
     }
-    
+
     private func analyzePitch(frequency: Double, amplitude: Double) {
-        // 【优化 1】过滤掉节拍器的高频音（800-2000 Hz）
-        // 节拍器通常使用高频短促音，与乐器音色不同
-        let isLikelyMetronome = frequency > 700.0 && frequency < 2100.0 && amplitude < 0.3
-        
-        if isLikelyMetronome {
-            // 忽略疑似节拍器的声音
-            return
-        }
-        
-        // 【优化 1.1】如果节拍器正在播放，过滤接近节拍器频率的突刺
-        if MetronomeStateManager.shared.isPlaying {
-            let isNearMetronomeTone = metronomeFrequencies.contains { abs(frequency - $0) < 25.0 }
-            if isNearMetronomeTone && amplitude < 0.6 {
-                return
-            }
-            
-            // 节拍瞬间抑制（减少抖动）
-            if MetronomeStateManager.shared.isVisualPulse {
-                return
-            }
-        }
-        
-        // 【优化 2】过滤掉人耳听不到的极端频率
         guard frequency > AudioConstants.minFrequency && frequency < AudioConstants.maxFrequency else { return }
-        
-        let baseFreq = self.standardFrequency
-        
+
         recentPitchEstimates.append(frequency)
         if recentPitchEstimates.count > maxPitchHistory {
             recentPitchEstimates.removeFirst(recentPitchEstimates.count - maxPitchHistory)
         }
-        let sortedEstimates = recentPitchEstimates.sorted()
-        let medianFrequency = sortedEstimates[sortedEstimates.count / 2]
-        
-        if MetronomeStateManager.shared.isPlaying, smoothedPitch > 0 {
-            let centsJump = abs(1200.0 * log2(medianFrequency / smoothedPitch))
-            if centsJump > 200 {
-                DispatchQueue.main.async { self.data.amplitude = amplitude }
-                return
+        let sorted = recentPitchEstimates.sorted()
+        let median = sorted[sorted.count / 2]
+
+        if smoothedPitch > 0 {
+            let jump = abs(1200.0 * log2(median / smoothedPitch))
+            if jump > 110 {
+                if pendingJumpPitch == 0 {
+                    pendingJumpPitch = median
+                    pendingJumpCount = 1
+                    return
+                } else {
+                    let delta = abs(1200.0 * log2(median / pendingJumpPitch))
+                    if delta < 30 { pendingJumpCount += 1 }
+                    else { pendingJumpPitch = median; pendingJumpCount = 1 }
+
+                    if pendingJumpCount >= 2 {
+                        smoothedPitch = median
+                        recentPitchEstimates = [median]
+                        pendingJumpPitch = 0
+                        pendingJumpCount = 0
+                    } else {
+                        return
+                    }
+                }
+            } else {
+                pendingJumpPitch = 0
+                pendingJumpCount = 0
             }
         }
-        
-        // 【优化 3】音高平滑处理，减少节拍器影响下的抖动
-        let smoothingFactor = MetronomeStateManager.shared.isPlaying ? 0.2 : 0.35
-        if smoothedPitch == 0 {
-            smoothedPitch = medianFrequency
-        } else {
-            smoothedPitch += (medianFrequency - smoothedPitch) * smoothingFactor
-        }
-        
-        let stableFrequency = smoothedPitch
-        
-        let semitones = 12.0 * log2(stableFrequency / baseFreq)
-        let noteNumDouble = semitones + 69.0
-        let roundedNoteNum = Int(round(noteNumDouble))
-        let diff = noteNumDouble - Double(roundedNoteNum)
-        let deviationCents = 100.0 * diff
-        
-        var index = roundedNoteNum % 12
-        if index < 0 { index += 12 }
-        
+
+        let smoothing = amplitude > 0.08 ? 0.75 : 0.55
+        if smoothedPitch == 0 { smoothedPitch = median }
+        else { smoothedPitch += (median - smoothedPitch) * smoothing }
+
+        let stable = smoothedPitch
+        let base = standardFrequency
+
+        let semitones = 12.0 * log2(stable / base)
+        let noteNum = semitones + 69.0
+        let rounded = Int(round(noteNum))
+        let diff = noteNum - Double(rounded)
+        let cents = diff * 100.0
+
+        var idx = rounded % 12
+        if idx < 0 { idx += 12 }
+
         DispatchQueue.main.async {
-            self.data.pitch = stableFrequency
-            self.data.noteName = self.noteNames[index]
-            self.data.deviation = deviationCents
-            self.data.amplitude = amplitude
+            self.data.pitch = stable
+            self.data.noteName = self.noteNames[idx]
+            self.data.deviation = cents
         }
     }
 }

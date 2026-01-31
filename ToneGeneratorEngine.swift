@@ -135,11 +135,13 @@ class ToneGeneratorEngine: ObservableObject {
             
             // 停止播放器
             self.player.stop()
+            self.player.reset()
             
             // 立即停止引擎，避免缓冲区继续播放
             if self.engine.isRunning {
                 self.engine.stop()
             }
+            self.engine.reset()
             
             DispatchQueue.main.async {
                 self.isPlaying = false
