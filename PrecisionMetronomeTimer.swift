@@ -208,9 +208,6 @@ class PrecisionMetronomeTimer {
         // 先停止，确保状态清零
         isPlaying = false
         
-        // 短暂延迟让音频回调看到 isPlaying = false
-        Thread.sleep(forTimeInterval: 0.01)
-        
         // 重置所有状态
         self.bpm = bpm
         self.timeSignature = timeSignature

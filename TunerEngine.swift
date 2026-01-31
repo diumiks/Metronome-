@@ -32,6 +32,9 @@ class TunerEngine: ObservableObject {
     // 音高平滑处理
     private var smoothedPitch: Double = 0
     private var silenceFrameCount = 0
+    private var isListening = false
+    private var recentPitchEstimates: [Double] = []
+    private let maxPitchHistory = 5
     
     // 节拍器可能使用的频率（用于过滤干扰）
     private let metronomeFrequencies: [Double] = [1200, 800, 2000, 1500, 600, 400, 1000, 750, 1600]
@@ -83,50 +86,77 @@ class TunerEngine: ObservableObject {
     }
     
     func startListening() {
-        stopPlaying()
-        if engine.isRunning {
-            engine.stop()
-        }
-        engine.reset()
-        
-        // 【新增】在获取输入格式前先设置音频会话
-        setupAudioSession()
-        
-        let format = mic.inputFormat(forBus: 0)
-        guard format.sampleRate > 0 else {
-            print("❌ Invalid microphone format: sampleRate = \(format.sampleRate)")
+        audioQueue.async { [weak self] in
+            guard let self = self else { return }
+            
+            self.lock.lock()
+            defer { self.lock.unlock() }
+            
+            guard !self.isListening else { return }
+            self.isListening = true
+            
+            self.shouldContinueScheduling = false
+            self.player.stop()
             DispatchQueue.main.async {
-                self.errorMessage = AudioError.deviceNotAvailable.localizedDescription
+                self.isPlaying = false
             }
-            return
-        }
-        
-        print("✅ Microphone format: \(format.sampleRate) Hz, \(format.channelCount) channels")
-        
-        mic.removeTap(onBus: 0)
-        
-        // 使用常量配置缓冲区大小
-        mic.installTap(onBus: 0, bufferSize: AudioConstants.bufferSize, format: format) { [weak self] (buffer, time) in
-            self?.processAudio(buffer: buffer)
-        }
-        
-        do {
-            try engine.start()
-            DispatchQueue.main.async {
-                self.errorMessage = nil
+            if self.engine.isRunning {
+                self.engine.stop()
             }
-        } catch {
-            print("⚠️ TunerEngine start error: \(error)")
-            DispatchQueue.main.async {
-                self.errorMessage = AudioError.engineStartFailed.localizedDescription
+            self.engine.reset()
+            
+            // 【新增】在获取输入格式前先设置音频会话
+            self.setupAudioSession()
+            
+            let format = self.mic.inputFormat(forBus: 0)
+            guard format.sampleRate > 0 else {
+                print("❌ Invalid microphone format: sampleRate = \(format.sampleRate)")
+                DispatchQueue.main.async {
+                    self.errorMessage = AudioError.deviceNotAvailable.localizedDescription
+                }
+                self.isListening = false
+                return
+            }
+            
+            print("✅ Microphone format: \(format.sampleRate) Hz, \(format.channelCount) channels")
+            
+            self.mic.removeTap(onBus: 0)
+            
+            // 使用常量配置缓冲区大小
+            self.mic.installTap(onBus: 0, bufferSize: AudioConstants.bufferSize, format: format) { [weak self] (buffer, _) in
+                self?.processAudio(buffer: buffer)
+            }
+            
+            do {
+                try self.engine.start()
+                DispatchQueue.main.async {
+                    self.errorMessage = nil
+                }
+            } catch {
+                print("⚠️ TunerEngine start error: \(error)")
+                DispatchQueue.main.async {
+                    self.errorMessage = AudioError.engineStartFailed.localizedDescription
+                }
+                self.isListening = false
             }
         }
     }
     
     func stopListening() {
-        mic.removeTap(onBus: 0)
-        engine.stop()
-        DispatchQueue.main.async { self.data = TunerData() }
+        audioQueue.async { [weak self] in
+            guard let self = self else { return }
+            
+            self.lock.lock()
+            defer { self.lock.unlock() }
+            
+            self.mic.removeTap(onBus: 0)
+            self.engine.stop()
+            self.isListening = false
+            self.recentPitchEstimates.removeAll()
+            self.smoothedPitch = 0
+            
+            DispatchQueue.main.async { self.data = TunerData() }
+        }
     }
     
     func playTone(frequency: Double) {
@@ -289,6 +319,7 @@ class TunerEngine: ObservableObject {
     private func processAudio(buffer: AVAudioPCMBuffer) {
         guard let channelData = buffer.floatChannelData?[0] else { return }
         let frameLength = Int(buffer.frameLength)
+        let isMetronomePulse = MetronomeStateManager.shared.isPlaying && MetronomeStateManager.shared.isVisualPulse
         
         // 性能优化：在栈上创建临时缓冲区，避免竞争条件
         // 由于音频回调在专用线程，使用局部变量更安全
@@ -319,6 +350,10 @@ class TunerEngine: ObservableObject {
         
         if Double(rms) > dynamicThreshold {
             silenceFrameCount = 0
+            if isMetronomePulse {
+                DispatchQueue.main.async { self.data.amplitude = Double(rms) }
+                return
+            }
             if let frequency = estimatePitch(buffer: localBuffer, sampleRate: buffer.format.sampleRate) {
                 analyzePitch(frequency: frequency, amplitude: Double(rms))
             } else {
@@ -438,12 +473,27 @@ class TunerEngine: ObservableObject {
         
         let baseFreq = self.standardFrequency
         
+        recentPitchEstimates.append(frequency)
+        if recentPitchEstimates.count > maxPitchHistory {
+            recentPitchEstimates.removeFirst(recentPitchEstimates.count - maxPitchHistory)
+        }
+        let sortedEstimates = recentPitchEstimates.sorted()
+        let medianFrequency = sortedEstimates[sortedEstimates.count / 2]
+        
+        if MetronomeStateManager.shared.isPlaying, smoothedPitch > 0 {
+            let centsJump = abs(1200.0 * log2(medianFrequency / smoothedPitch))
+            if centsJump > 200 {
+                DispatchQueue.main.async { self.data.amplitude = amplitude }
+                return
+            }
+        }
+        
         // 【优化 3】音高平滑处理，减少节拍器影响下的抖动
         let smoothingFactor = MetronomeStateManager.shared.isPlaying ? 0.2 : 0.35
         if smoothedPitch == 0 {
-            smoothedPitch = frequency
+            smoothedPitch = medianFrequency
         } else {
-            smoothedPitch += (frequency - smoothedPitch) * smoothingFactor
+            smoothedPitch += (medianFrequency - smoothedPitch) * smoothingFactor
         }
         
         let stableFrequency = smoothedPitch
