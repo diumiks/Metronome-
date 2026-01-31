@@ -8,6 +8,7 @@ struct SimplifiedTunerView: View {
     @Environment(\.colorScheme) var colorScheme
     @Environment(\.scenePhase) private var scenePhase
     @State private var isVisible = false
+    @State private var startListeningTask: Task<Void, Never>?
     
     var body: some View {
         NavigationStack {
@@ -130,26 +131,42 @@ struct SimplifiedTunerView: View {
             .navigationBarTitleDisplayMode(.large)
             .onAppear {
                 isVisible = true
-                tuner.startListening()
+                scheduleStartListening()
                 NotificationCenter.default.post(name: .stopMetronome, object: nil)
             }
             .onDisappear {
                 isVisible = false
+                cancelStartListening()
                 tuner.stopListening()
             }
             .onChange(of: scenePhase) { _, newPhase in
                 switch newPhase {
                 case .background, .inactive:
+                    cancelStartListening()
                     tuner.stopListening()
                 case .active:
                     if isVisible {
-                        tuner.startListening()
+                        scheduleStartListening()
                     }
                 default:
                     break
                 }
             }
         }
+    }
+
+    private func scheduleStartListening() {
+        cancelStartListening()
+        startListeningTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            guard isVisible else { return }
+            tuner.startListening()
+        }
+    }
+
+    private func cancelStartListening() {
+        startListeningTask?.cancel()
+        startListeningTask = nil
     }
     
     // MARK: - 计算属性

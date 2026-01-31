@@ -14,6 +14,7 @@ struct TunerView: View {
     // 读取用户设置
     @Environment(\.scenePhase) private var scenePhase
     @State private var isVisible = false
+    @State private var startListeningTask: Task<Void, Never>?
     
     let defaultFrequencies = [440.0, 442.0]
     
@@ -83,22 +84,24 @@ struct TunerView: View {
             }
             .onAppear {
                 isVisible = true
-                tuner.startListening()
+                scheduleStartListening()
                 loadSavedFrequencies()
                 NotificationCenter.default.post(name: .stopMetronome, object: nil)
             }
             .onDisappear {
                 isVisible = false
+                cancelStartListening()
                 tuner.stopPlaying()
                 tuner.stopListening()
             }
             .onChange(of: scenePhase) { _, newPhase in
                 switch newPhase {
                 case .background, .inactive:
+                    cancelStartListening()
                     tuner.stopListening()
                 case .active:
                     if isVisible {
-                        tuner.startListening()
+                        scheduleStartListening()
                     }
                 default:
                     break
@@ -112,6 +115,20 @@ struct TunerView: View {
                 )
             }
         }
+    }
+
+    private func scheduleStartListening() {
+        cancelStartListening()
+        startListeningTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            guard isVisible else { return }
+            tuner.startListening()
+        }
+    }
+
+    private func cancelStartListening() {
+        startListeningTask?.cancel()
+        startListeningTask = nil
     }
     
     func loadSavedFrequencies() {
