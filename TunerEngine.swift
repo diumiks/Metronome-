@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFoundation
+import Combine
 
 final class TunerEngine: ObservableObject {
     private let audioQueue = DispatchQueue(label: "com.metronomeapp.tuner.audio", qos: .userInitiated)
