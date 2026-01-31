@@ -39,6 +39,7 @@ struct MetronomeView: View {
     
     @State private var currentBeat = -1
     @State private var isVisualPulse = false
+    @State private var isDraggingBpm = false
     
     @State private var lastTapTime: Date?
     @State private var showSettings = false
@@ -108,7 +109,17 @@ struct MetronomeView: View {
                         .accessibilityLabel("减少速度")
                         .accessibilityHint("将 BPM 减少 1")
                         
-                        Slider(value: $bpm, in: AudioConstants.minBPM...AudioConstants.maxBPM, step: 1)
+                        Slider(
+                            value: $bpm,
+                            in: AudioConstants.minBPM...AudioConstants.maxBPM,
+                            step: 1,
+                            onEditingChanged: { isEditing in
+                                isDraggingBpm = isEditing
+                                if !isEditing, isPlaying {
+                                    precisionTimer.updateBPM(bpm, timeSignature: timeSignature, soundTheme: selectedSoundTheme.rawValue)
+                                }
+                            }
+                        )
                             .accentColor(.blue)
                             .accessibilityLabel("速度调节")
                             .accessibilityValue("\(Int(bpm)) BPM")
@@ -187,7 +198,7 @@ struct MetronomeView: View {
                 saveSettings()
             }
             .onChange(of: bpm) { oldValue, newValue in
-                if isPlaying {
+                if isPlaying, !isDraggingBpm {
                     precisionTimer.updateBPM(newValue, timeSignature: timeSignature, soundTheme: selectedSoundTheme.rawValue)
                 }
             }
