@@ -10,6 +10,8 @@ struct SimplifiedTunerView: View {
     @AppStorage(UserDefaultsKeys.autoStopListening) private var autoStopListening = true
     
     @Environment(\.colorScheme) var colorScheme
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var isVisible = false
     
     var body: some View {
         NavigationStack {
@@ -131,11 +133,26 @@ struct SimplifiedTunerView: View {
             .navigationTitle("校音器")
             .navigationBarTitleDisplayMode(.large)
             .onAppear {
+                isVisible = true
                 tuner.startListening()
+                NotificationCenter.default.post(name: .stopMetronome, object: nil)
             }
             .onDisappear {
+                isVisible = false
                 if autoStopListening {
                     tuner.stopListening()
+                }
+            }
+            .onChange(of: scenePhase) { _, newPhase in
+                switch newPhase {
+                case .background:
+                    tuner.stopListening()
+                case .active:
+                    if isVisible {
+                        tuner.startListening()
+                    }
+                default:
+                    break
                 }
             }
         }
