@@ -28,7 +28,7 @@ class MetronomeStateManager: ObservableObject {
         self.isVisualPulse = true
         
         // 短暂延迟后重置脉冲
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
             self?.isVisualPulse = false
         }
     }

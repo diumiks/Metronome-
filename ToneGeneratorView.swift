@@ -1,7 +1,5 @@
 import SwiftUI
 
-import SwiftUI
-
 struct ToneGeneratorView: View {
     @StateObject private var engine = ToneGeneratorEngine()
     
@@ -195,6 +193,9 @@ struct ToneGeneratorView: View {
             }
             .onDisappear {
                 // 离开页面时停止播放
+                engine.stopPlaying()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .stopToneGenerator)) { _ in
                 engine.stopPlaying()
             }
             .onChange(of: scenePhase) { oldPhase, newPhase in

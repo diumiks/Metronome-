@@ -18,7 +18,7 @@ struct AudioConstants {
     
     // 音频处理参数
     static let sampleRate: Double = 44100.0
-    static let bufferSize: AVAudioFrameCount = 4096  // 改为 AVAudioFrameCount 类型
+    static let bufferSize: AVAudioFrameCount = 2048  // 改为 AVAudioFrameCount 类型
     static let rmsThreshold: Double = 0.01  // 改为 Double 以避免类型转换问题
 }
 
@@ -90,3 +90,6 @@ enum AudioError: Error {
     }
 }
 
+extension Notification.Name {
+    static let stopToneGenerator = Notification.Name("stopToneGenerator")
+}
