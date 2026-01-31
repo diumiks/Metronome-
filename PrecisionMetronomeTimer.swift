@@ -142,14 +142,16 @@ class PrecisionMetronomeTimer {
                     let theme = self.soundThemes[self.soundTheme]
                     let isStrongBeat = (self.currentFrequency == theme.strong)
                     
-                    let amplitude: Float
+                    let baseAmplitude: Float
                     if self.currentFrequency > 1800.0 {
                         // 高频音色：强音 0.6，弱音 0.4
-                        amplitude = isStrongBeat ? 0.6 : 0.4
+                        baseAmplitude = isStrongBeat ? 0.6 : 0.4
                     } else {
                         // 常规音色：强音 0.8，弱音 0.5
-                        amplitude = isStrongBeat ? 0.8 : 0.5
+                        baseAmplitude = isStrongBeat ? 0.8 : 0.5
                     }
+                    let amplitudeBoost: Float = 1.5
+                    let amplitude = min(baseAmplitude * amplitudeBoost, 1.0)
                     
                     // 【高频优化】使用预计算的相位增量，避免实时计算误差
                     sample = sin(self.phase) * amplitude * fadeOut
